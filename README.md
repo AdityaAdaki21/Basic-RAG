@@ -50,7 +50,7 @@ This application extracts text from PDF documents, splits it into manageable chu
 
 1. Run the application with a PDF file:
    ```
-   python main.py path/to/your/document.pdf
+    python main.py --file path/to/your/document.pdf --chunk-size 1024
    ```
 
 2. When prompted, enter your questions about the PDF content. Type 'exit' to quit.
