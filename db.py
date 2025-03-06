@@ -181,7 +181,7 @@ def update_index(index, new_embeddings):
     index.add(new_embeddings)
     return index
 
-def search_index(query_embedding, index, top_k=3):
+def search_index(query_embedding, index, top_k=6):
     """Legacy function for backward compatibility."""
     query_embedding = np.array(query_embedding).astype("float32")
     distances, indices = index.search(query_embedding, top_k)

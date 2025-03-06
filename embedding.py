@@ -10,16 +10,43 @@ class EmbeddingClient:
     """Client for generating embeddings from Ollama API."""
     
     def __init__(self, base_url="http://localhost:11434", default_model="mxbai-embed-large"):
-        """
-        Initialize the embedding client.
-        
-        Args:
-            base_url: Base URL for the Ollama API
-            default_model: Default embedding model to use
-        """
         self.base_url = base_url.rstrip('/')
         self.default_model = default_model
         self.embedding_endpoint = f"{self.base_url}/api/embeddings"
+        self.model_endpoint = f"{self.base_url}/api/show"
+        self.loaded_model = None
+        self.ensure_model_loaded(default_model)  # Load the model when client is initialized
+
+    def ensure_model_loaded(self, model):
+        """Ensure the specified model is loaded and ready for use."""
+        if model == self.loaded_model:
+            return  # Model is already loaded
+        
+        try:
+            # Check if the model is loaded
+            response = requests.post(
+                self.model_endpoint,
+                json={"name": model},
+                timeout=(5, 10)
+            )
+            
+            if response.status_code == 200:
+                self.loaded_model = model
+                print(f"Model {model} is already loaded")
+            else:
+                # If not loaded, load it
+                print(f"Loading model {model}...")
+                response = requests.post(
+                    f"{self.base_url}/api/pull",
+                    json={"name": model},
+                    timeout=(5, 300)  # Longer timeout for model loading
+                )
+                response.raise_for_status()
+                self.loaded_model = model
+                print(f"Model {model} successfully loaded")
+        except Exception as e:
+            print(f"Failed to ensure model is loaded: {e}")
+            # Continue anyway, the embeddings endpoint will load the model if needed"
     
     def embed(self, text, model=None, max_retries=3, retry_delay=1):
         """
@@ -39,6 +66,10 @@ class EmbeddingClient:
             
         model = model or self.default_model
         
+        # Ensure the model is loaded
+        if model != self.loaded_model:
+            self.ensure_model_loaded(model)
+
         for attempt in range(max_retries):
             try:
                 response = requests.post(

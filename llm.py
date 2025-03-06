@@ -17,17 +17,44 @@ class LLMClient:
     """Client for interacting with Ollama LLM API."""
     
     def __init__(self, base_url="http://localhost:11434", default_model="llama3.2"):
-        """
-        Initialize the LLM client.
-        
-        Args:
-            base_url: Base URL for the Ollama API
-            default_model: Default model to use for generation
-        """
         self.base_url = base_url.rstrip('/')
         self.default_model = default_model
         self.generate_endpoint = f"{self.base_url}/api/generate"
+        self.model_endpoint = f"{self.base_url}/api/show"
+        self.loaded_model = None
+        self.ensure_model_loaded(default_model)  # Load the model when client is initialized
     
+    def ensure_model_loaded(self, model):
+        """Ensure the specified model is loaded and ready for use."""
+        if model == self.loaded_model:
+            return  # Model is already loaded
+        
+        try:
+            # Check if the model is loaded
+            response = requests.post(
+                self.model_endpoint,
+                json={"name": model},
+                timeout=(5, 10)
+            )
+            
+            if response.status_code == 200:
+                self.loaded_model = model
+                logger.info(f"Model {model} is already loaded")
+            else:
+                # If not loaded, load it
+                logger.info(f"Loading model {model}...")
+                response = requests.post(
+                    f"{self.base_url}/api/pull",
+                    json={"name": model},
+                    timeout=(5, 300)  # Longer timeout for model loading
+                )
+                response.raise_for_status()
+                self.loaded_model = model
+                logger.info(f"Model {model} successfully loaded")
+        except Exception as e:
+            logger.warning(f"Failed to ensure model is loaded: {e}")
+
+
     def generate(self, 
                 prompt: str, 
                 model: Optional[str] = None,
@@ -93,7 +120,15 @@ class LLMClient:
                     logger.error(f"Failed to generate text after {max_retries} attempts: {e}")
                     return f"Error: Failed to generate response after {max_retries} attempts. Please check the Ollama server and try again."
     
-    def generate_with_context(self, query: str, context: str, model: Optional[str] = None) -> str:
+    def generate_with_context(self, 
+                          query: str,
+                          context: str, 
+                          model: Optional[str] = None,
+                          temperature: float = 0.7,
+                          max_tokens: Optional[int] = None,
+                          stream: bool = False,
+                          max_retries: int = 3,
+                          retry_delay: int = 1) -> Union[str, Dict[str, Any]]:
         """
         Generate a response based on a query and context information.
         
@@ -106,18 +141,22 @@ class LLMClient:
             Generated response
         """
         model = model or self.default_model
-        
-        prompt = f"""Context information is below.
----------------------
-{context}
----------------------
-Given the context information and not prior knowledge, answer the question: {query}
+        # Ensure the model is loaded
+        if model != self.loaded_model:
+            self.ensure_model_loaded(model)
 
-If the context doesn't contain relevant information to answer the question,
-respond with "I don't have enough information to answer that question."
-"""
-        
+        prompt = f"""Context information is below.
+    ---------------------
+    {context}
+    ---------------------
+    Given the context information and not prior knowledge, answer the question: {query}
+
+    If the context doesn't contain relevant information to answer the question,
+    respond with "I don't have enough information to answer that question."
+    """
+
         return self.generate(prompt, model=model)
+
 
 # For backward compatibility
 def call_ollama(prompt, model="llama3.2"):

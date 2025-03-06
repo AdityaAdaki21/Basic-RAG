@@ -200,6 +200,22 @@ class RAGSystem:
         response = self.llm_client.generate_with_context(query, context)
         
         return response
+    
+    def cleanup(self):
+        """Cleanup resources when the program exits."""
+        # Unload models if needed
+        try:
+            if self.llm_client.loaded_model:
+                # Unload LLM model if you want to free up memory
+                print(f"Unloading LLM model {self.llm_client.loaded_model}...")
+                # Add code to unload the model if Ollama API supports it
+            
+            if self.embedding_client.loaded_model:
+                # Unload embedding model if you want to free up memory
+                print(f"Unloading embedding model {self.embedding_client.loaded_model}...")
+                # Add code to unload the model if Ollama API supports it
+        except Exception as e:
+            print(f"Error during cleanup: {e}")
 
 def main():
     """Main function to run the RAG system."""
