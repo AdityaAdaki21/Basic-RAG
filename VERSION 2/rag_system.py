@@ -8,9 +8,11 @@ import argparse
 import concurrent.futures
 import time
 import sys
+import threading
+import re
 
 class OllamaRAG:
-    def __init__(self, llm_model="llama3.2", embedding_model="mxbai-embed-large"):
+    def __init__(self, llm_model="tinyllama", embedding_model="mxbai-embed-large"):
         """
         Initialize the RAG system with specified models.
         
@@ -24,9 +26,14 @@ class OllamaRAG:
         self.embeddings = []
         self.base_url = "http://localhost:11434/api"
         self.current_pdf = None
+        self.model_loaded = False
+        self.context_window = 2048  # Default context window size, adjust for your model
         
         # Verify that the models are available in Ollama
         self._verify_models()
+        
+        # Preload models
+        self._preload_models()
     
     def _verify_models(self) -> None:
         """Verify that the required models are available."""
@@ -51,6 +58,47 @@ class OllamaRAG:
             print("Make sure the Ollama server is running with 'ollama serve'")
             sys.exit(1)
     
+    def _preload_models(self) -> None:
+        """Preload models into memory to keep them hot for fast inference."""
+        print(f"Preloading models into memory...")
+        
+        # Define a simple prompt for model loading
+        warmup_prompt = "Hello, this is a warmup prompt to load the model into memory."
+        
+        # Preload embedding model
+        try:
+            start_time = time.time()
+            print(f"Loading embedding model '{self.embedding_model}'...")
+            # Just do a single embedding to load the model
+            _ = self.get_embedding("This is a test.")
+            print(f"Embedding model loaded in {time.time() - start_time:.2f} seconds")
+        except Exception as e:
+            print(f"Warning: Failed to preload embedding model: {e}")
+        
+        # Preload LLM model
+        try:
+            start_time = time.time()
+            print(f"Loading LLM model '{self.llm_model}'...")
+            # Send a simple prompt to load the model
+            response = requests.post(
+                f"{self.base_url}/generate",
+                json={
+                    "model": self.llm_model,
+                    "prompt": warmup_prompt,
+                    "stream": False,
+                    "keep_alive": "5m"  # Keep model loaded for 5 minutes
+                }
+            )
+            
+            # Check if we got a successful response
+            if response.status_code == 200:
+                print(f"LLM model loaded in {time.time() - start_time:.2f} seconds")
+                self.model_loaded = True
+            else:
+                print(f"Warning: Failed to preload LLM model. Status code: {response.status_code}")
+        except Exception as e:
+            print(f"Warning: Failed to preload LLM model: {e}")
+    
     def get_embedding(self, text: str) -> List[float]:
         """
         Get embeddings for a piece of text.
@@ -63,7 +111,11 @@ class OllamaRAG:
         """
         response = requests.post(
             f"{self.base_url}/embeddings",
-            json={"model": self.embedding_model, "prompt": text}
+            json={
+                "model": self.embedding_model,
+                "prompt": text,
+                "keep_alive": "5m"  # Keep model loaded for 5 minutes
+            }
         )
         
         if response.status_code != 200:
@@ -185,6 +237,40 @@ class OllamaRAG:
         
         return results
     
+    def _keep_models_alive(self) -> None:
+        """Background thread to keep models loaded in memory."""
+        while True:
+            time.sleep(240)  # Send keep-alive every 4 minutes (since timeout is 5m)
+            try:
+                # Keep LLM alive
+                response = requests.post(
+                    f"{self.base_url}/generate",
+                    json={
+                        "model": self.llm_model,
+                        "prompt": "keep alive",
+                        "stream": False,
+                        "keep_alive": "5m"
+                    }
+                )
+                
+                # Keep embedding model alive
+                response = requests.post(
+                    f"{self.base_url}/embeddings",
+                    json={
+                        "model": self.embedding_model,
+                        "prompt": "keep alive",
+                        "keep_alive": "5m"
+                    }
+                )
+            except Exception:
+                # Silently ignore errors during keep-alive
+                pass
+    
+    def start_keep_alive_thread(self) -> None:
+        """Start a background thread to keep models loaded."""
+        keep_alive_thread = threading.Thread(target=self._keep_models_alive, daemon=True)
+        keep_alive_thread.start()
+    
     def generate_response(self, query: str, system_prompt: str = None, top_k: int = 3) -> str:
         """
         Generate a response to the query using the LLM and retrieved context.
@@ -223,7 +309,23 @@ Given the context information and not prior knowledge, answer the following ques
 {query}
 """
         
+        # Ensure we don't exceed the context window
+        if len(prompt) > self.context_window:
+            # Truncate context to fit within context window
+            max_context_length = self.context_window - len(query) - 200  # Leave room for query and other text
+            context_truncated = context[:max_context_length] + "..."
+            prompt = f"""Context information is below (truncated to fit context window).
+---------------------
+{context_truncated}
+---------------------
+
+Given the context information and not prior knowledge, answer the following question:
+{query}
+"""
+        
         print("Generating response...")
+        start_time = time.time()
+        
         # Send the request to Ollama
         response = requests.post(
             f"{self.base_url}/generate",
@@ -231,14 +333,20 @@ Given the context information and not prior knowledge, answer the following ques
                 "model": self.llm_model,
                 "prompt": prompt,
                 "system": system_prompt,
-                "stream": False
+                "stream": False,
+                "keep_alive": "5m"  # Keep model loaded for 5 minutes
             }
         )
         
         if response.status_code != 200:
             return f"Error generating response: {response.text}"
         
-        return response.json()["response"]
+        response_text = response.json()["response"]
+        
+        # Print some stats
+        print(f"Response generated in {time.time() - start_time:.2f} seconds")
+        
+        return response_text
 
     def save_knowledge_base(self, filepath: str = None) -> None:
         """
@@ -284,52 +392,68 @@ def main():
     parser = argparse.ArgumentParser(description="PDF-based RAG using Ollama")
     parser.add_argument("--pdf", type=str, help="Path to PDF file to ingest")
     parser.add_argument("--kb", type=str, help="Path to knowledge base file to load")
-    parser.add_argument("--llm", type=str, default="llama3.2", help="LLM model to use")
+    parser.add_argument("--llm", type=str, default="tinyllama", help="LLM model to use")
     parser.add_argument("--embedder", type=str, default="mxbai-embed-large", help="Embedding model to use")
     parser.add_argument("--workers", type=int, default=4, help="Number of parallel workers for embedding")
+    parser.add_argument("--context-window", type=int, default=2048, help="Context window size for the LLM")
     
     args = parser.parse_args()
     
     # Initialize the RAG system
     rag = OllamaRAG(llm_model=args.llm, embedding_model=args.embedder)
     
-    # Initial setup - either load PDF or knowledge base
-    if args.pdf:
-        rag.ingest_pdf(args.pdf, max_workers=args.workers)
-        # Auto-save knowledge base after ingestion
-        rag.save_knowledge_base()
-    elif args.kb:
-        rag.load_knowledge_base(args.kb)
+    # Set context window size
+    rag.context_window = args.context_window
     
-    # Interactive mode for asking questions
-    pdf_info = f" about {rag.current_pdf}" if rag.current_pdf else ""
-    if rag.documents:
-        print(f"\nPDF RAG System - Ready to answer questions{pdf_info}")
-        print("==================================")
-        print("Type 'exit' to quit, 'save' to save knowledge base, 'help' for commands")
-        
-        while True:
-            user_input = input("\nEnter your question: ")
-            
-            if user_input.lower() == 'exit':
-                break
-            elif user_input.lower() == 'save':
-                rag.save_knowledge_base()
-            elif user_input.lower() == 'help':
-                print("\nAvailable commands:")
-                print("  exit - Exit the program")
-                print("  save - Save the current knowledge base")
-                print("  help - Show this help message")
-                print("  Any other input will be treated as a question to answer")
-            else:
-                response = rag.generate_response(user_input)
-                print("\nResponse:")
-                print(response)
+    # Start the keep-alive thread
+    rag.start_keep_alive_thread()
+    
+    # Either load existing knowledge base or ingest a new PDF
+    if args.kb:
+        rag.load_knowledge_base(args.kb)
+    elif args.pdf:
+        rag.ingest_pdf(args.pdf, max_workers=args.workers)
+        # Save the knowledge base after ingestion
+        rag.save_knowledge_base()
     else:
-        print("\nNo documents loaded. Please provide a PDF file or knowledge base.")
-        print("Example usage:")
-        print("  python rag_system.py --pdf document.pdf")
-        print("  python rag_system.py --kb knowledge_base.json")
+        print("Please provide either a PDF file to ingest (--pdf) or a knowledge base to load (--kb)")
+        return
+    
+    # Interactive query loop
+    print("\n" + "="*50)
+    print(f"RAG System ready with model: {args.llm}")
+    print("Type 'exit' or 'quit' to end the session")
+    print("Type 'save' to save the current knowledge base")
+    print("="*50 + "\n")
+    
+    while True:
+        query = input("\nEnter your question: ")
+        
+        # Check for special commands
+        if query.lower() in ['exit', 'quit']:
+            print("Exiting...")
+            break
+        elif query.lower() == 'save':
+            kb_path = input("Enter filename to save knowledge base (or press Enter for default): ")
+            rag.save_knowledge_base(kb_path if kb_path else None)
+            continue
+        
+        # Generate and display response
+        start_time = time.time()
+        response = rag.generate_response(query)
+        total_time = time.time() - start_time
+        
+        print("\n" + "-"*50)
+        print(response)
+        print("-"*50)
+        print(f"Response generated in {total_time:.2f} seconds")
+
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nProgram terminated by user")
+    except Exception as e:
+        print(f"\nError: {e}")
+        sys.exit(1)
