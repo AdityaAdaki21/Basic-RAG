@@ -20,8 +20,8 @@ This application extracts text from PDF documents, splits it into manageable chu
 
 ## Screenshot
 ![image](https://github.com/user-attachments/assets/cdf64bc7-713d-4d1a-bc68-52ac9e9f6ae4)
-
-
+![alt text](image.png)
+![alt text](image-1.png)
 ## Requirements
 
 - Python 3.9
